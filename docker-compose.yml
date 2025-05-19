@@ -51,8 +51,8 @@ services:
       - /var/lib/docker/containers:/var/lib/docker/containers:ro
       - /var/run/docker.sock:/var/run/docker.sock
 
-ml_monitor:
-    build: D:\Diplom\ml-modulle
+  ml_monitor:
+    build: ./ml-module
     container_name: ml_monitor
     environment:
       - ELASTICSEARCH_HOST=elasticsearch
