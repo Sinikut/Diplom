@@ -1,0 +1,5 @@
+elasticsearch==7.15.2
+aiogram==3.0.0b7
+scikit-learn==1.4.0
+pandas==2.0.3
+numpy==1.26.0

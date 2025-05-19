@@ -51,6 +51,20 @@ services:
       - /var/lib/docker/containers:/var/lib/docker/containers:ro
       - /var/run/docker.sock:/var/run/docker.sock
 
+ml_monitor:
+    build: D:\Diplom\ml-modulle
+    container_name: ml_monitor
+    environment:
+      - ELASTICSEARCH_HOST=elasticsearch
+      - TELEGRAM_BOT_TOKEN=your_bot_token_here
+      - TELEGRAM_CHAT_ID=your_chat_id_here
+    networks:
+      - elk-net
+    depends_on:
+      - elasticsearch
+    volumes:
+      - ./ml_module:/app
+
 volumes:
   esdata:
     driver: local
