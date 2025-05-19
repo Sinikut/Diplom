@@ -3,6 +3,7 @@ from elasticsearch import Elasticsearch
 from aiogram import Bot, types
 import pandas as pd
 from sklearn.ensemble import IsolationForest
+import numpy as np
 import re
 import asyncio
 
@@ -10,6 +11,13 @@ import asyncio
 ELASTICSEARCH_HOST = os.getenv('ELASTICSEARCH_HOST', 'elasticsearch')
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
+
+# Инициализация ML-модели
+model = IsolationForest(
+    n_estimators=100,
+    contamination=0.01,  # 1% аномалий
+    random_state=42
+)
 
 # Подключение к Elasticsearch
 es = Elasticsearch([f'http://{ELASTICSEARCH_HOST}:9200'])
@@ -31,12 +39,32 @@ DANGEROUS_PATTERNS = [
 ]
 
 
+def extract_features(query):
+    """Извлечение признаков для ML-модели"""
+    return np.array([
+        len(query),  # Длина запроса
+        len(re.findall(r'\bSELECT\b', query, re.IGNORECASE)),
+        len(re.findall(r'\bWHERE\b', query, re.IGNORECASE)),
+        len(re.findall(r'\bJOIN\b', query, re.IGNORECASE)),
+        len(re.findall(r';--', query)),  # SQL-инъекции
+        len(re.findall(r'\bUNION\b', query, re.IGNORECASE))
+    ]).reshape(1, -1)
+
+
 def check_dangerous_queries(query):
-    """Проверка запроса на наличие опасных паттернов"""
+    """Комбинированная проверка: правила + ML"""
+    # Проверка по регулярным выражениям
     query_lower = query.lower()
     for pattern in DANGEROUS_PATTERNS:
         if re.search(pattern, query_lower):
             return True, pattern
+
+    # Проверка через ML-модель
+    features = extract_features(query)
+    prediction = model.predict(features)
+    if prediction[0] == -1:
+        return True, "ML-аномалия"
+
     return False, None
 
 
@@ -45,53 +73,63 @@ async def send_alert(message):
     await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message)
 
 
-async def monitor_logs():
-    """Мониторинг логов и обнаружение аномалий"""
-    last_checked_time = None
+async def train_model():
+    """Обучение модели на исторических данных"""
+    # Получение данных из Elasticsearch
+    query = {"query": {"match_all": {}}, "size": 1000}
+    res = es.search(index="postgresql-logs-*", body=query)
 
+    # Преобразование в DataFrame
+    df = pd.DataFrame([
+        {
+            "timestamp": hit["_source"]["@timestamp"],
+            "query": hit["_source"].get("query", ""),
+            "user": hit["_source"].get("user", "")
+        }
+        for hit in res["hits"]["hits"]
+    ])
+
+    # Сбор признаков
+    X = np.array([extract_features(q) for q in df["query"]])
+
+    # Обучение модели
+    if len(X) > 0:
+        model.fit(X)
+        print(f"Модель обучена на {len(df)} записях")
+
+async def monitor_logs():
+    """Мониторинг логов в реальном времени"""
+    await train_model()  # Первоначальное обучение
+
+    last_checked_time = None
     while True:
         try:
             # Поиск новых логов
-            query = {
-                "query": {
-                    "range": {
-                        "@timestamp": {
-                            "gt": last_checked_time.isoformat() if last_checked_time else "now-1m"
-                        }
-                    }
-                },
-                "size": 100,
-                "sort": [{"@timestamp": "asc"}]
-            }
-
+            query = {"query": {"range": {"@timestamp": {"gt": last_checked_time}}}}
             res = es.search(index="postgresql-logs-*", body=query)
 
             if res['hits']['hits']:
-                last_checked_time = pd.to_datetime(res['hits']['hits'][-1]['_source']['@timestamp'])
+                last_checked_time = res['hits']['hits'][-1]['_source']['@timestamp']
 
                 for hit in res['hits']['hits']:
                     source = hit['_source']
                     query_text = source.get('query', '')
 
-                    # Проверка на опасные запросы
-                    is_dangerous, pattern = check_dangerous_queries(query_text)
+                    # Комбинированная проверка
+                    is_dangerous, reason = check_dangerous_queries(query_text)
                     if is_dangerous:
                         alert_msg = (
-                            f"⚠️ Опасный SQL-запрос обнаружен!\n"
-                            f"🕒 Время: {source['@timestamp']}\n"
-                            f"👤 Пользователь: {source.get('user', 'N/A')}\n"
-                            f"📝 Запрос: {query_text[:500]}...\n"
-                            f"🔍 Паттерн: {pattern}\n"
-                            f"❗️ Требуется немедленное вмешательство!"
+                            f"Обнаружена аномалия!\n"
+                            f"Время: {source['@timestamp']}\n"
+                            f"Пользователь: {source.get('user', 'N/A')}\n"
+                            f"Запрос: {query_text[:300]}...\n"
+                            f"Причина: {reason}"
                         )
                         await send_alert(alert_msg)
 
-                        # Напоминание!!! добавить автоматическую блокировку пользователя
-
         except Exception as e:
-            error_msg = f"Ошибка при мониторинге логов: {str(e)}"
+            error_msg = f"Ошибка мониторинга: {str(e)}"
             await send_alert(error_msg)
-            print(error_msg)
 
         await asyncio.sleep(30)
 
