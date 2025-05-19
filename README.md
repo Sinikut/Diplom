@@ -1,0 +1,1 @@
+Настройка ELK Stack с помощью Filebeat для анализа журналов PostgreSQL.
