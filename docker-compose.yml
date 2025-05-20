@@ -46,18 +46,19 @@ services:
     networks:
       - elk-net
     volumes:
+      - ./postgresql.yml:/usr/share/filebeat/modules.d/postgresql.yml
       - ./filebeat/filebeat.yml:/usr/share/filebeat/filebeat.yml
       - ./logs:/var/log/postgresql
       - /var/lib/docker/containers:/var/lib/docker/containers:ro
       - /var/run/docker.sock:/var/run/docker.sock
 
   ml_monitor:
-    build: ./ml-module
+    build: ./ml_module
     container_name: ml_monitor
+    env_file:
+      - .env
     environment:
       - ELASTICSEARCH_HOST=elasticsearch
-      - TELEGRAM_BOT_TOKEN=your_bot_token_here
-      - TELEGRAM_CHAT_ID=your_chat_id_here
     networks:
       - elk-net
     depends_on:

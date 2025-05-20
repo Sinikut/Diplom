@@ -1,4 +1,3 @@
-import os
 from elasticsearch import Elasticsearch
 from aiogram import Bot, types
 import pandas as pd
@@ -6,11 +5,22 @@ from sklearn.ensemble import IsolationForest
 import numpy as np
 import re
 import asyncio
+from dotenv import load_dotenv
+import os
+import logging
 
-# Конфигурация
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+load_dotenv()  # Загружает переменные из .env
 ELASTICSEARCH_HOST = os.getenv('ELASTICSEARCH_HOST', 'elasticsearch')
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
+if not all([TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID]):
+    raise ValueError("Не заданы TELEGRAM_BOT_TOKEN или TELEGRAM_CHAT_ID в .env")
 
 # Инициализация ML-модели
 model = IsolationForest(
@@ -97,11 +107,33 @@ async def train_model():
         model.fit(X)
         print(f"Модель обучена на {len(df)} записях")
 
+async def check_bot():
+    try:
+        await bot.get_me()
+    except Exception as e:
+        logger.error(f"Ошибка инициализации бота: {e}")
+        exit(1)
+
+async def check_elastic():
+    try:
+        if not await es.ping():
+            logger.critical("Не удалось подключиться к Elasticsearch!")
+            exit(1)
+        logger.info("Подключение к Elasticsearch успешно")
+    except Exception as e:
+        logger.critical(f"Ошибка подключения к Elasticsearch: {e}")
+        exit(1)
+
 async def monitor_logs():
     """Мониторинг логов в реальном времени"""
+    await check_bot()
+    await check_elastic()
     await train_model()  # Первоначальное обучение
-
     last_checked_time = None
+    # Проверка подключения к Elasticsearch
+    if not es.ping():
+        logger.error("Не удалось подключиться к Elasticsearch!")
+        exit(1)
     while True:
         try:
             # Поиск новых логов
