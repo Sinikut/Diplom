@@ -4,7 +4,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 RUN apt-get update && apt-get install -y gcc python3-dev
 COPY . .
-# Копируем конфигурацию supervisord
-COPY supervisord.conf .
+# Копируем конфигурацию supervizord
+COPY supervizord.conf .
 # Запускаем supervisord
-CMD ["supervisord"]
+CMD ["supervizord"]
