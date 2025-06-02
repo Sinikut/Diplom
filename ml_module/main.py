@@ -72,8 +72,10 @@ def extract_query_from_message(message: str) -> str:
 
 async def train_model():
     """Обучение модели с проверкой данных"""
-    await asyncio.sleep(10)
+    await asyncio.sleep(15)  # дать системе стартовать
     try:
+        logger.info("🔍 Запуск обучения модели...")
+
         query = {
             "query": {"match_all": {}},
             "size": 100,
@@ -81,25 +83,38 @@ async def train_model():
         }
         res = await es.search(index="postgresql-logs-*", body=query)
 
-        queries = [
-            extract_query_from_message(hit["_source"].get("postgresql.message", ""))
-            for hit in res["hits"]["hits"]
-            if "postgresql.message" in hit["_source"]
-        ]
+        hits = res["hits"]["hits"]
+        logger.info(f"📦 Получено {len(hits)} логов из Elasticsearch")
 
-        queries = [q for q in queries if q.strip()]
+        if not hits:
+            logger.warning("⚠️ Нет данных для обучения")
+            return False
+
+        # Выводим первые 3 лога для анализа структуры
+        for i, hit in enumerate(hits[:3]):
+            logger.info(f"▶️ Лог #{i + 1}: {hit['_source'].keys()}")
+            logger.info(f"📄 Сообщение: {hit['_source'].get('postgresql.message', 'Нет поля postgresql.message')}")
+
+        queries = []
+        for hit in res["hits"]["hits"]:
+            message = hit["_source"].get("postgresql", {}).get("message", "")
+            if message:
+                queries.append(message)
+            else:
+                logger.info(f"📄 Сообщение: Нет поля postgresql.message")
+
         if not queries:
-            logger.warning("Нет данных для обучения")
+            logger.warning("⚠️ Поле postgresql.message отсутствует во всех логах")
             return False
 
         X = np.array([extract_features(q) for q in queries])
         model.fit(X)
-        logger.info(f"Модель обучена на {len(queries)} записях")
+        logger.info(f"✅ Модель обучена на {len(queries)} записях")
         return True
 
     except Exception as e:
-        logger.error(f"Ошибка обучения модели: {e}")
-        await send_alert(f"Ошибка обучения модели: {e}")
+        logger.error(f"❌ Ошибка обучения модели: {e}")
+        await send_alert(f"Критическая ошибка обучения модели: {e}")
         return False
 
 def check_dangerous_queries(query):
@@ -132,6 +147,7 @@ async def send_alert(message):
 
 async def check_connections():
     """Проверка подключений"""
+    await asyncio.sleep(15)  # дать системе стартовать
     try:
         # Проверка бота
         await bot.get_me()
@@ -180,23 +196,19 @@ async def monitor_logs():
 
             for hit in res['hits']['hits']:
                 source = hit['_source']
-                full_message = source.get('postgresql.message', '')
-                query_text = extract_query_from_message(full_message)
-                user = source.get('user', 'N/A')
-                database = source.get('database', 'N/A')
-                timestamp = source['@timestamp']
+                message = source.get('postgresql', {}).get('message', '')
+                timestamp = source.get('@timestamp', 'N/A')
 
-                if query_text:  # Пропускаем пустые запросы
-                    is_dangerous, reason = check_dangerous_queries(query_text)
+                if message:
+                    is_dangerous, reason = check_dangerous_queries(message)
                     if is_dangerous:
-                        message = (
+                        alert_msg = (
                             f"🚨 Обнаружена аномалия!\n\n"
                             f"⏱ Время: {timestamp}\n"
-                            f"👤 Пользователь: {user}\n"
-                            f"🗄 База данных: {database}\n"
+                            f"📄 Запрос: {message}\n"
                             f"🔍 Причина: {reason}"
                         )
-                        await send_alert(message)
+                        await send_alert(alert_msg)
 
     except Exception as e:
         error_msg = f"Ошибка мониторинга: {str(e)}"
