@@ -1,0 +1,21 @@
+filebeat.inputs:
+- type: log
+  enabled: true
+  paths:
+    - /var/log/postgresql/postgresql.log
+  fields:
+    type: postgresql
+  fields_under_root: true
+  processors:
+    - rename:
+        fields:
+          - from: "message"
+            to: "postgresql.message"
+
+setup.ilm.enabled: false  # Критически важно!
+setup.template.name: "postgresql-logs"
+setup.template.pattern: "postgresql-logs-*"
+
+output.elasticsearch:
+  hosts: ["http://elasticsearch:9200"]
+  index: "postgresql-logs-%{+yyyy.MM.dd}"  # Простая форма вместо indices[]
