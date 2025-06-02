@@ -240,3 +240,4 @@ if __name__ == "__main__":
     finally:
         asyncio.run(es.close())
         asyncio.run(bot.session.close())
+# Тестовый commit
