@@ -54,7 +54,6 @@ DANGEROUS_PATTERNS = [
     r'update\s+\w+\s+set\s+\w+\s*=\s*\w+\s*(?!where)'
 ]
 
-
 def extract_features(query):
     """Синхронная обработка запроса"""
     return np.array([
@@ -65,6 +64,11 @@ def extract_features(query):
         len(re.findall(r';--', query)),
         len(re.findall(r'\bUNION\b', query, re.IGNORECASE))
     ]).reshape(1, -1)
+
+# Извлечение текста из statement
+def extract_query_from_message(message: str) -> str:
+    match = re.search(r'statement:\s+(.*)', message)
+    return match.group(1) if match else ''
 
 async def train_model():
     """Обучение модели с проверкой данных"""
@@ -78,11 +82,12 @@ async def train_model():
         res = await es.search(index="postgresql-logs-*", body=query)
 
         queries = [
-            hit["_source"].get("query", "")
+            extract_query_from_message(hit["_source"].get("postgresql.message", ""))
             for hit in res["hits"]["hits"]
-            if hit["_source"].get("query")
+            if "postgresql.message" in hit["_source"]
         ]
 
+        queries = [q for q in queries if q.strip()]
         if not queries:
             logger.warning("Нет данных для обучения")
             return False
@@ -125,7 +130,6 @@ async def send_alert(message):
     except Exception as e:
         logger.error(f"Ошибка отправки сообщения: {e}")
 
-
 async def check_connections():
     """Проверка подключений"""
     try:
@@ -140,7 +144,6 @@ async def check_connections():
         logger.critical(f"Ошибка подключений: {e}")
         await send_alert(f"Критическая ошибка: {e}")
         exit(1)
-
 
 async def monitor_logs():
     """Основная задача мониторинга"""
@@ -177,7 +180,8 @@ async def monitor_logs():
 
             for hit in res['hits']['hits']:
                 source = hit['_source']
-                query_text = source.get('query', '')
+                full_message = source.get('postgresql.message', '')
+                query_text = extract_query_from_message(full_message)
                 user = source.get('user', 'N/A')
                 database = source.get('database', 'N/A')
                 timestamp = source['@timestamp']
@@ -207,9 +211,9 @@ async def main():
     trained = False
     for attempt in range(3):
         try:
-            await train_model()
-            trained = True
-            break
+            trained = await train_model()
+            if trained:
+                break
         except Exception as e:
             logger.error(f"Попытка {attempt + 1}: Ошибка обучения: {e}")
             await asyncio.sleep(5)
@@ -221,16 +225,11 @@ async def main():
 
     # Настройка планировщика только после успешного обучения
     scheduler = AsyncIOScheduler(timezone=pytz.timezone("Europe/Moscow"))
-    scheduler.add_job(
-        monitor_logs,
-        IntervalTrigger(seconds=30),
-        max_instances=1
-    )
+    scheduler.add_job(monitor_logs,IntervalTrigger(seconds=30),max_instances=1)
     scheduler.start()
 
     while True:
         await asyncio.sleep(1)
-
 
 if __name__ == "__main__":
     try:
@@ -240,4 +239,3 @@ if __name__ == "__main__":
     finally:
         asyncio.run(es.close())
         asyncio.run(bot.session.close())
-# Тестовый commit
