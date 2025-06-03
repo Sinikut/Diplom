@@ -13,35 +13,36 @@ import pytz
 import os
 import sys
 
+# Перенаправление stdout/stderr в лог-файлы
 sys.stdout = open('/var/log/app_out.log', 'a')
 sys.stderr = open('/var/log/app_err.log', 'a')
 
+# Настройка логирования
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
 
+# Загрузка переменных из .env
 load_dotenv()
 ELASTICSEARCH_HOST = os.getenv('ELASTICSEARCH_HOST', 'elasticsearch')
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 
+# Проверка обязательных переменных
 if not all([TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID]):
     logger.critical("Не заданы TELEGRAM_BOT_TOKEN или TELEGRAM_CHAT_ID в .env")
     exit(1)
 
-# Инициализация ML-модели
-model = IsolationForest(
-    n_estimators=100,
-    contamination=0.01,
-    random_state=42
-)
+# Инициализация модели
+model = IsolationForest(n_estimators=100, contamination=0.01, random_state=42)
 
-# Асинхронный клиент Elasticsearch
+# Инициализация бота и Elasticsearch
 es = AsyncElasticsearch([f'http://{ELASTICSEARCH_HOST}:9200'])
 bot = Bot(token=TELEGRAM_BOT_TOKEN)
 
+# Подозрительные шаблоны
 DANGEROUS_PATTERNS = [
     r'drop\s+database',
     r'truncate\s+table',
@@ -54,8 +55,7 @@ DANGEROUS_PATTERNS = [
     r'update\s+\w+\s+set\s+\w+\s*=\s*\w+\s*(?!where)'
 ]
 
-def extract_features(query):
-    """Синхронная обработка запроса"""
+def extract_features(query: str):
     return np.array([
         len(query),
         len(re.findall(r'\bSELECT\b', query, re.IGNORECASE)),
@@ -65,10 +65,11 @@ def extract_features(query):
         len(re.findall(r'\bUNION\b', query, re.IGNORECASE))
     ]).reshape(1, -1)
 
-# Извлечение текста из statement
-def extract_query_from_message(message: str) -> str:
-    match = re.search(r'statement:\s+(.*)', message)
-    return match.group(1) if match else ''
+async def send_alert(message: str):
+    try:
+        await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message)
+    except Exception as e:
+        logger.error(f"Ошибка отправки сообщения: {e}")
 
 async def train_model():
     """Обучение модели с проверкой данных"""
@@ -77,44 +78,30 @@ async def train_model():
         logger.info("🔍 Запуск обучения модели...")
 
         query = {
-            "query": {"match_all": {}},
+            "query": {"exists": {"field": "postgresql.message"}},
             "size": 100,
             "sort": [{"@timestamp": {"order": "desc"}}]
         }
         res = await es.search(index="postgresql-logs-*", body=query)
 
-        hits = res["hits"]["hits"]
-        logger.info(f"📦 Получено {len(hits)} логов из Elasticsearch")
+        messages = [
+            hit["_source"]["postgresql"]["message"]
+            for hit in res["hits"]["hits"]
+            if "postgresql" in hit["_source"] and "message" in hit["_source"]["postgresql"]
+        ]
 
-        if not hits:
-            logger.warning("⚠️ Нет данных для обучения")
+        if not messages:
+            logger.warning("Нет данных для обучения")
             return False
 
-        # Выводим первые 3 лога для анализа структуры
-        for i, hit in enumerate(hits[:3]):
-            logger.info(f"▶️ Лог #{i + 1}: {hit['_source'].keys()}")
-            logger.info(f"📄 Сообщение: {hit['_source'].get('postgresql.message', 'Нет поля postgresql.message')}")
-
-        queries = []
-        for hit in res["hits"]["hits"]:
-            message = hit["_source"].get("postgresql", {}).get("message", "")
-            if message:
-                queries.append(message)
-            else:
-                logger.info(f"📄 Сообщение: Нет поля postgresql.message")
-
-        if not queries:
-            logger.warning("⚠️ Поле postgresql.message отсутствует во всех логах")
-            return False
-
-        X = np.array([extract_features(q) for q in queries])
+        X = np.vstack([extract_features(q) for q in messages])
         model.fit(X)
-        logger.info(f"✅ Модель обучена на {len(queries)} записях")
+        logger.info(f"✅ Модель обучена на {len(messages)} записях")
         return True
 
     except Exception as e:
-        logger.error(f"❌ Ошибка обучения модели: {e}")
-        await send_alert(f"Критическая ошибка обучения модели: {e}")
+        logger.error(f"Ошибка обучения модели: {e}")
+        await send_alert(f"Ошибка обучения модели: {e}")
         return False
 
 def check_dangerous_queries(query):
@@ -137,13 +124,6 @@ def check_dangerous_queries(query):
         return False, str(e)
 
     return False, None
-
-async def send_alert(message):
-    """Отправка уведомления"""
-    try:
-        await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message)
-    except Exception as e:
-        logger.error(f"Ошибка отправки сообщения: {e}")
 
 async def check_connections():
     """Проверка подключений"""
@@ -190,30 +170,32 @@ async def monitor_logs():
 
         if res['hits']['hits']:
             new_last_time = res['hits']['hits'][-1]['_source']['@timestamp']
-
             with open('last_checked_time.txt', 'w') as f:
                 f.write(new_last_time)
 
             for hit in res['hits']['hits']:
                 source = hit['_source']
-                message = source.get('postgresql', {}).get('message', '')
-                timestamp = source.get('@timestamp', 'N/A')
+                query_text = source.get("postgresql", {}).get("message", "")
+                user = source.get('user', 'N/A')
+                database = "postgres"
+                timestamp = source['@timestamp']
 
-                if message:
-                    is_dangerous, reason = check_dangerous_queries(message)
+                if query_text:
+                    is_dangerous, reason = check_dangerous_queries(query_text)
                     if is_dangerous:
-                        alert_msg = (
+                        message = (
                             f"🚨 Обнаружена аномалия!\n\n"
                             f"⏱ Время: {timestamp}\n"
-                            f"📄 Запрос: {message}\n"
-                            f"🔍 Причина: {reason}"
+                            f"👤 Пользователь: {user}\n"
+                            f"🗄 База данных: {database}\n"
+                            f"🔍 Причина: {reason}\n"
+                            f"Запрос: {query_text.strip()}"
                         )
-                        await send_alert(alert_msg)
+                        await send_alert(message)
 
     except Exception as e:
-        error_msg = f"Ошибка мониторинга: {str(e)}"
-        logger.error(error_msg)
-        await send_alert(error_msg)
+        logger.error(f"Ошибка мониторинга: {e}")
+        await send_alert(f"Ошибка мониторинга: {e}")
 
 async def main():
     """Основная функция инициализации"""
@@ -222,13 +204,11 @@ async def main():
     # Обучаем модель с повторными попытками
     trained = False
     for attempt in range(3):
-        try:
-            trained = await train_model()
-            if trained:
-                break
-        except Exception as e:
-            logger.error(f"Попытка {attempt + 1}: Ошибка обучения: {e}")
-            await asyncio.sleep(5)
+        trained = await train_model()
+        if trained:
+            break
+        logger.warning(f"Попытка {attempt + 1} неудачна. Повтор через 5 секунд...")
+        await asyncio.sleep(5)
 
     if not trained:
         logger.critical("Не удалось обучить модель после 3 попыток")
@@ -237,7 +217,7 @@ async def main():
 
     # Настройка планировщика только после успешного обучения
     scheduler = AsyncIOScheduler(timezone=pytz.timezone("Europe/Moscow"))
-    scheduler.add_job(monitor_logs,IntervalTrigger(seconds=30),max_instances=1)
+    scheduler.add_job(monitor_logs, IntervalTrigger(seconds=30), max_instances=1)
     scheduler.start()
 
     while True:
